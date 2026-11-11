@@ -1,0 +1,14 @@
+body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 640px; padding: 16px; line-height: 1.6; }
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.2rem; margin-top: 1.5em; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+h3 { font-size: 1rem; }
+.note { color: #555; font-size: 0.9rem; }
+.warning { background: #fff3cd; border: 1px solid #e6c200; padding: 8px; }
+.error { color: #c00; font-size: 0.9rem; }
+.chip { display: inline-block; background: #eef; border-radius: 12px; padding: 2px 8px; margin: 2px; }
+button.mini { font-size: 0.8rem; margin-left: 4px; }
+.check { display: inline-block; margin: 2px 8px 2px 0; }
+input, select, button { font-size: 1rem; }
+#paid-list li { color: #555; }
+#balance-list li.me, #settlement-list li.me, #paid-list li.me { font-weight: bold; background: #fff7e6; }
+ul { padding-left: 1.2em; }

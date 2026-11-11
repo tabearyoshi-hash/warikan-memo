@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>わりかんメモ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+<h1>わりかんメモ</h1>
+<p class="note">旅行・合宿・飲み会の立て替えを記録して、誰が誰にいくら払えば精算できるかを出します。アカウント登録なしで使えます。</p>
+<p id="save-warning" class="warning" style="display:none">保存できていません。閉じると消えるので、JSON書き出しで保存してください。</p>
+
+<section>
+<h2>イベント</h2>
+<p><label>切り替え <select id="event-select"></select></label>
+<button id="new-event" type="button">新しいイベント</button>
+<button id="delete-event" type="button">このイベントを削除</button></p>
+<label>イベント名 <input id="event-name" type="text" placeholder="例：スノボ合宿 11月"></label>
+<p class="note">イベントごとにメンバーと支出が分かれます。切り替えると前のイベントのデータは残ったままです。</p>
+</section>
+
+<section>
+<h2>メンバー</h2>
+<div id="member-list"></div>
+<p><label>自分は <select id="me-select"></select></label> <span class="note">自分の行だけ目立たせます</span></p>
+<p>
+<input id="new-member" type="text" placeholder="名前">
+<button id="add-member" type="button">追加</button>
+</p>
+</section>
+
+<section>
+<h2>支出を追加</h2>
+<p id="form-note" class="note"></p>
+<form id="expense-form">
+<p><label>内容 <input id="f-title" type="text" placeholder="例：宿泊代" required></label></p>
+<p><label>支払った人 <select id="f-payer"></select></label></p>
+<p><label>金額（円） <input id="f-amount" type="text" inputmode="numeric" autocomplete="off" placeholder="例：1200" required></label></p>
+<p>対象者（割り勘する人）</p>
+<div id="f-participants"></div>
+<p id="per-person-preview" class="note"></p>
+<p><label>メモ <input id="f-memo" type="text" placeholder="任意"></label></p>
+<p><button id="expense-submit" type="submit">支出を記録</button> <button id="cancel-edit" type="button" style="display:none">編集をやめる</button> <span id="edit-note" class="note"></span> <span id="form-msg" class="error"></span></p>
+</form>
+</section>
+
+<section>
+<h2>支出一覧</h2>
+<p id="summary"></p>
+<ul id="expense-list"></ul>
+</section>
+
+<section>
+<h2>精算</h2>
+<h3>メンバーごとの残高</h3>
+<p id="me-summary" class="note"></p>
+<ul id="balance-list"></ul>
+<h3>送金リスト（これだけ送れば精算完了）</h3>
+<p id="settlement-progress"></p>
+<ul id="settlement-list"></ul>
+<p id="settlement-note" class="note"></p>
+<p><button id="copy-settlement" type="button">精算まとめをコピー</button> <span id="copy-msg" class="note"></span></p>
+<h3>支払い済み</h3>
+<ul id="paid-list"></ul>
+</section>
+
+<section>
+<h2>データ</h2>
+<p>
+<button id="export-btn" type="button">JSONで書き出し</button>
+<label>JSONを読み込む <input id="import-file" type="file" accept=".json,application/json"></label>
+</p>
+</section>
+
+<section>
+<h2>設定</h2>
+<p><label>1人あたりの単位 <select id="rounding-unit">
+<option value="1">1円単位</option>
+<option value="10">10円単位</option>
+<option value="100">100円単位</option>
+</select></label></p>
+<p><label>端数の扱い <select id="rounding-mode">
+<option value="ceil">切り上げ</option>
+<option value="floor">切り捨て</option>
+<option value="round">四捨五入</option>
+</select></label></p>
+<p id="rounding-note" class="note"></p>
+<p class="note">設定はイベントごとに保存されます。標準は1円単位・切り上げです。</p>
+</section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

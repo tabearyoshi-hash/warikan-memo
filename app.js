@@ -1,0 +1,894 @@
+// わりかんメモ — 旅行・合宿・飲み会などの立て替えを記録し、
+// 「誰が誰にいくら払えば精算できるか」を最小の送金回数で出すWebアプリ。
+// 依存なし・ビルドなし。ブラウザでは localStorage に保存し、
+// Node では module.exports 経由で純粋ロジックをテストできる。
+(function (global) {
+  'use strict';
+
+  // 金額の入力値を数値に正規化する（純粋関数）。
+  // iPhone の日本語キーボードや LINE などからの貼り付けで入る
+  // 全角数字・全角カンマ／ピリオド・半角カンマ・空白・「円」「￥」を受け付ける。
+  // 数値そのものも通す。読めないものは NaN を返す。
+  function normalizeAmount(value) {
+    if (typeof value === 'number') return value;
+    var s = String(value == null ? '' : value);
+    // 全角数字・全角カンマ・全角ピリオドを半角へ
+    s = s.replace(/[０-９，．]/g, function (ch) {
+      return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0);
+    });
+    // カンマ・空白・「円」「￥」を除く（全角空白も含む）
+    s = s.replace(/[,、\s　円￥]/g, '');
+    if (s === '') return NaN;
+    return Number(s);
+  }
+
+  // 端数設定の正規化（純粋関数）。単位は 1・10・100 円から、扱いは
+  // 切り上げ（ceil）・切り捨て（floor）・四捨五入（round）から選ぶ。
+  // 標準は 1円単位・切り上げ（2026-11-12 ユーザー決定。四捨五入は同日追加）。
+  // 不正・未指定は標準に寄せる。
+  var ROUNDING_UNITS = [1, 10, 100];
+  function normalizeRounding(unit, mode) {
+    var u = Number(unit);
+    if (ROUNDING_UNITS.indexOf(u) < 0) u = 1;
+    var m = (mode === 'floor' || mode === 'ceil' || mode === 'round') ? mode : 'ceil';
+    return { unit: u, mode: m };
+  }
+
+  // 端数の扱いの表示名（設定欄の説明で使う）。
+  function roundingModeLabel(mode) {
+    if (mode === 'floor') return '切り捨て';
+    if (mode === 'round') return '四捨五入';
+    return '切り上げ';
+  }
+
+  // イベントから端数設定を読む。旧データ（設定なし）は標準になる。
+  function roundingFromEvent(ev) {
+    if (!ev) return normalizeRounding(1, 'ceil');
+    return normalizeRounding(ev.roundingUnit, ev.roundingMode);
+  }
+
+  // 1人あたり金額を端数設定で丸める（純粋関数）。
+  // 例：1000円を3人、1円単位・切り上げなら 334円、切り捨てなら 333円、
+  // 四捨五入なら 333円。100円単位・切り上げなら 400円、切り捨てなら
+  // 300円、四捨五入なら 300円（350円ちょうどなら四捨五入で 400円）。
+  // 四捨五入は単位の半分以上で切り上げ、未満で切り捨てる（0.5は切り上げ）。
+  // 全員が同じ金額になるため、合計は支出額と一致しないことがある
+  // （丸めの差額は、結果として支払者が引き受ける側で調整される）。
+  function roundShare(amount, count, rounding) {
+    var r = normalizeRounding(rounding && rounding.unit, rounding && rounding.mode);
+    var raw = amount / count;
+    var scaled = raw / r.unit;
+    var rounded;
+    if (r.mode === 'ceil') rounded = Math.ceil(scaled) * r.unit;
+    else if (r.mode === 'floor') rounded = Math.floor(scaled) * r.unit;
+    else rounded = Math.floor(scaled + 0.5 + 1e-9) * r.unit; // 四捨五入（半分は切り上げ、浮動小数の誤差を補正）
+    return rounded;
+  }
+
+  // 支出1件を正規化する。金額は円・整数・1円以上。対象者は空でないこと。
+  function newExpense(data, members) {
+    var amount = Math.floor(normalizeAmount(data.amount));
+    if (!isFinite(amount) || amount < 1) return null;
+    var payer = String(data.payer || '');
+    if (members.indexOf(payer) < 0) return null;
+    var participants = (data.participants || []).map(String).filter(function (m) {
+      return members.indexOf(m) >= 0;
+    });
+    // 重複を除く（同じ人が2回選ばれても1人分）
+    participants = participants.filter(function (m, i) { return participants.indexOf(m) === i; });
+    if (participants.length === 0) return null;
+    return {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      title: String(data.title || '支出').trim() || '支出',
+      payer: payer,
+      amount: amount,
+      participants: participants,
+      memo: String(data.memo || '').trim()
+    };
+  }
+
+  // メンバーごとの「支払った額」「負担額」「残高（+なら受け取る側）」を返す。
+  // 第3引数に端数設定がある場合：1人あたりを単位・切り上げ／切り捨てで丸める。
+  // 全員の表示上の負担は同じ丸め額だが、丸めで出た余り（切り上げ）／不足
+  // （切り捨て）はその支出の支払者が引き受けるよう、支払者の負担を
+  // 「丸め額×人数 − 支出額」だけ差し引いて調整する。これにより残高の
+  // 合計は常に0になり、送金リストで全員が精算完了になる。
+  // 例：1000円を3人・100円切り上げなら他の2人は400円ずつ払い、
+  // 支払者の実質負担は200円になる。
+  // 端数設定がない場合（旧来の呼び出し・テスト互換）：端数は1円ずつ、
+  // 支払者が対象に含まれれば支払者から、含まれなければ先頭の対象者から配る。
+  function computeBalances(members, expenses, rounding) {
+    var paid = {}, share = {};
+    members.forEach(function (m) { paid[m] = 0; share[m] = 0; });
+    expenses.forEach(function (ex) {
+      if (paid[ex.payer] === undefined) return;
+      paid[ex.payer] += ex.amount;
+      var ps = ex.participants.filter(function (m) { return members.indexOf(m) >= 0; });
+      if (ps.length === 0) return;
+      if (rounding) {
+        var per = roundShare(ex.amount, ps.length, rounding);
+        ps.forEach(function (m) { share[m] += per; });
+        // 丸めの差額は支払者が引き受ける（支払者の負担から差額を引く）
+        share[ex.payer] -= (per * ps.length - ex.amount);
+        return;
+      }
+      var base = Math.floor(ex.amount / ps.length);
+      var rest = ex.amount - base * ps.length;
+      ps.forEach(function (m) { share[m] += base; });
+      var order = ps.slice();
+      var payerIdx = order.indexOf(ex.payer);
+      if (payerIdx > 0) { order.splice(payerIdx, 1); order.unshift(ex.payer); }
+      for (var i = 0; i < rest; i++) { share[order[i % order.length]] += 1; }
+    });
+    return members.map(function (m) {
+      return { member: m, paid: paid[m], share: share[m], balance: paid[m] - share[m] };
+    });
+  }
+
+  // 残高から最小送金リストを作る（貪欲法：最大の債権者と最大の債務者から順に相殺）。
+  // 返値は [{from, to, amount}]。from が to へ amount 円払う。
+  function settle(balances) {
+    var creditors = balances.filter(function (b) { return b.balance > 0; })
+      .map(function (b) { return { member: b.member, amount: b.balance }; })
+      .sort(function (a, b) { return b.amount - a.amount; });
+    var debtors = balances.filter(function (b) { return b.balance < 0; })
+      .map(function (b) { return { member: b.member, amount: -b.balance }; })
+      .sort(function (a, b) { return b.amount - a.amount; });
+    var transfers = [];
+    var i = 0, j = 0;
+    while (i < creditors.length && j < debtors.length) {
+      var c = creditors[i], d = debtors[j];
+      var amount = Math.min(c.amount, d.amount);
+      transfers.push({ from: d.member, to: c.member, amount: amount });
+      c.amount -= amount; d.amount -= amount;
+      if (c.amount === 0) i++;
+      if (d.amount === 0) j++;
+    }
+    return transfers;
+  }
+
+  // 送金1件の識別キー。支出が変わって送金内容が変われば一致しなくなる
+  // （金額が変わった送金を「支払い済み」のままにしないための安全側の扱い）。
+  function transferKey(tr) { return JSON.stringify([tr.from, tr.to, tr.amount]); }
+
+  // 送金リストを未払い／支払い済みに分ける。現在の送金に一致しない
+  // 支払い済みキーは無視する（表示には出さない）。
+  function splitTransfers(transfers, paidKeys) {
+    var paidSet = {};
+    (paidKeys || []).forEach(function (k) { paidSet[k] = true; });
+    var unpaid = [], paid = [];
+    transfers.forEach(function (tr) {
+      if (paidSet[transferKey(tr)]) paid.push(tr); else unpaid.push(tr);
+    });
+    return { unpaid: unpaid, paid: paid };
+  }
+
+  // 支払い済みキーの追加／取り消し（純粋関数）。
+  function togglePaidKey(paidKeys, key) {
+    var list = (paidKeys || []).slice();
+    var i = list.indexOf(key);
+    if (i >= 0) list.splice(i, 1); else list.push(key);
+    return list;
+  }
+
+  // 現在の送金に一致する支払い済みキーだけを残す。
+  function prunePaidKeys(transfers, paidKeys) {
+    var valid = {};
+    transfers.forEach(function (tr) { valid[transferKey(tr)] = true; });
+    return (paidKeys || []).filter(function (k) { return valid[k]; });
+  }
+
+  // 支出を記録する前に見せる「1人あたり」の試算。computeBalances と同じ端数ルール。
+  // 返値は [{member, share}]（対象者の順）。入力が不正なら null。
+  // 第5引数に端数設定を渡すと、残高計算と同じ丸めで試算する。
+  function previewShares(amount, participants, payer, members, rounding) {
+    var ex = newExpense({ title: '', payer: payer, amount: amount, participants: participants }, members);
+    if (!ex) return null;
+    if (rounding) {
+      // プレビューは「1人あたりの丸め額」を見せる（支払者の差額調整は含めない）
+      var per = roundShare(ex.amount, ex.participants.length, rounding);
+      return ex.participants.map(function (m) { return { member: m, share: per }; });
+    }
+    var balances = computeBalances(members, [ex], rounding);
+    var byMember = {};
+    balances.forEach(function (b) { byMember[b.member] = b.share; });
+    return ex.participants.map(function (m) { return { member: m, share: byMember[m] }; });
+  }
+
+  // プレビューの表示文。端数で1円多く負担する人がいれば名前を添える。
+  function formatPreview(shares) {
+    if (!shares || shares.length === 0) return '';
+    var min = shares[0].share, max = shares[0].share;
+    shares.forEach(function (s) {
+      if (s.share < min) min = s.share;
+      if (s.share > max) max = s.share;
+    });
+    if (min === max) return '1人あたり ' + yen(min) + '（' + shares.length + '人で割る）';
+    var extra = shares.filter(function (s) { return s.share === max; }).map(function (s) { return s.member; });
+    return '1人あたり ' + yen(min) + '（' + extra.join('・') + ' は ' + yen(max) + '）';
+  }
+
+  // 支出1件を編集する（純粋関数）。id が同じ支出を data で置き換え、
+  // id は元のまま残す。見つからない・内容が不正なら null を返し、
+  // 元の配列は変更しない（呼び出し側は返値が null でないときだけ差し替える）。
+  function editExpense(expenses, id, data, members) {
+    var idx = -1;
+    for (var i = 0; i < expenses.length; i++) {
+      if (expenses[i].id === id) { idx = i; break; }
+    }
+    if (idx < 0) return null;
+    var updated = newExpense(data, members);
+    if (!updated) return null;
+    updated.id = expenses[idx].id;
+    var next = expenses.slice();
+    next[idx] = updated;
+    return next;
+  }
+
+  // メンバー名を変更する（純粋関数）。支出の支払者・対象者・「自分」・
+  // 支払い済み印の送金元／送金先も一緒に置き換える。改名しても送金内容
+  // （金額）は変わらないため、支払い済み印はキーを書き換えて残す
+  // （支出の追加・削除とは違い、印を落とさない）。
+  // 名前が空・元の名前と同じ・すでにいる名前・メンバーにいない場合は
+  // null を返し、元のイベントは変更しない。
+  function renameMember(ev, oldName, newName) {
+    if (!ev || !Array.isArray(ev.members)) return null;
+    var next = String(newName || '').trim();
+    if (!next) return null;
+    if (ev.members.indexOf(oldName) < 0) return null;
+    if (next === oldName) return null;
+    if (ev.members.indexOf(next) >= 0) return null;
+    function rename(n) { return n === oldName ? next : n; }
+    return {
+      id: ev.id,
+      eventName: ev.eventName,
+      members: ev.members.map(rename),
+      expenses: (ev.expenses || []).map(function (ex) {
+        return {
+          id: ex.id, title: ex.title, payer: rename(ex.payer), amount: ex.amount,
+          participants: ex.participants.map(rename), memo: ex.memo || ''
+        };
+      }),
+      paidTransfers: (ev.paidTransfers || []).map(function (key) {
+        try {
+          var parts = JSON.parse(key);
+          if (!Array.isArray(parts) || parts.length !== 3) return key;
+          return JSON.stringify([rename(parts[0]), rename(parts[1]), parts[2]]);
+        } catch (err) { return key; }
+      }),
+      me: ev.me === oldName ? next : (ev.me || ''),
+      roundingUnit: roundingFromEvent(ev).unit,
+      roundingMode: roundingFromEvent(ev).mode
+    };
+  }
+
+  // 「自分」の残高1件を返す。me が残高一覧になければ null。
+  function meBalance(balances, me) {
+    if (!me) return null;
+    for (var i = 0; i < balances.length; i++) {
+      if (balances[i].member === me) return balances[i];
+    }
+    return null;
+  }
+
+  // 送金に「自分」が関わるか（払う側・受け取る側のどちらか）。
+  function involvesMe(tr, me) {
+    if (!me) return false;
+    return tr.from === me || tr.to === me;
+  }
+
+  // 精算まとめの共有用テキスト（LINEなどに貼り付ける用）。
+  // 未払いと支払い済みを分けて出し、最後に残額または全件済みを付ける。
+  // 送金リストと同じ settle／splitTransfers から作るため、画面と文言がずれない。
+  function settlementText(ev) {
+    var name = (ev && ev.eventName) || '名前なしのイベント';
+    var members = (ev && ev.members) || [];
+    var expenses = (ev && ev.expenses) || [];
+    var transfers = settle(computeBalances(members, expenses, roundingFromEvent(ev)));
+    var split = splitTransfers(transfers, (ev && ev.paidTransfers) || []);
+    var lines = ['【わりかんメモ】' + name];
+    if (transfers.length === 0) {
+      lines.push(expenses.length === 0 ? '支出はまだありません。' : '全員精算済みです。');
+    } else {
+      split.unpaid.forEach(function (tr) {
+        lines.push(tr.from + ' → ' + tr.to + '：' + yen(tr.amount));
+      });
+      split.paid.forEach(function (tr) {
+        lines.push(tr.from + ' → ' + tr.to + '：' + yen(tr.amount) + '（支払い済み）');
+      });
+      if (split.paid.length === transfers.length) {
+        lines.push('全て支払い済みです。');
+      } else {
+        var remaining = split.unpaid.reduce(function (s, tr) { return s + tr.amount; }, 0);
+        lines.push('残り ' + yen(remaining) + '（' + split.unpaid.length + '件）');
+      }
+    }
+    return lines.join('\n');
+  }
+
+  // 支出全体の合計と件数
+  function totals(expenses) {
+    return {
+      count: expenses.length,
+      amount: expenses.reduce(function (sum, ex) { return sum + ex.amount; }, 0)
+    };
+  }
+
+  // インポート用バリデーション：形が合うものだけ通す
+  function validateImport(data) {
+    if (!data || typeof data !== 'object') return null;
+    if (typeof data.eventName !== 'string' || !Array.isArray(data.members) || !Array.isArray(data.expenses)) return null;
+    var members = data.members.map(String).filter(function (m) { return m.trim() !== ''; });
+    if (members.length === 0) return null;
+    var expenses = [];
+    for (var i = 0; i < data.expenses.length; i++) {
+      var ex = newExpense(data.expenses[i], members);
+      if (ex) expenses.push(ex);
+    }
+    // 支払い済みキー（v0.3〜）。文字列だけ通し、重複を除く。旧データには無いので空になる。
+    var paidTransfers = [];
+    if (Array.isArray(data.paidTransfers)) {
+      data.paidTransfers.forEach(function (k) {
+        if (typeof k === 'string' && paidTransfers.indexOf(k) < 0) paidTransfers.push(k);
+      });
+    }
+    // 「自分」（v0.5〜）。メンバーにいない名前は空にする。旧データには無いので空になる。
+    var me = (typeof data.me === 'string' && members.indexOf(data.me) >= 0) ? data.me : '';
+    // 端数設定（v0.11〜）。単位・扱いを正規化し、旧データは標準（1円・切り上げ）になる。
+    var rounding = normalizeRounding(data.roundingUnit, data.roundingMode);
+    return { eventName: data.eventName, members: members, expenses: expenses, paidTransfers: paidTransfers, me: me, roundingUnit: rounding.unit, roundingMode: rounding.mode };
+  }
+
+  function newId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+  function newEvent(name) {
+    return { id: newId(), eventName: String(name || ''), members: [], expenses: [], paidTransfers: [], me: '', roundingUnit: 1, roundingMode: 'ceil' };
+  }
+
+  // 複数イベントの保存形式 {events:[...], activeEventId} を検証・正規化する。
+  function validateStore(data) {
+    if (!data || typeof data !== 'object' || !Array.isArray(data.events)) return null;
+    var events = [];
+    data.events.forEach(function (raw) {
+      var v = validateImport(raw);
+      if (!v) return;
+      var ev = newEvent(v.eventName);
+      ev.members = v.members; ev.expenses = v.expenses; ev.paidTransfers = v.paidTransfers; ev.me = v.me;
+      ev.roundingUnit = v.roundingUnit; ev.roundingMode = v.roundingMode;
+      if (typeof raw.id === 'string' && raw.id) ev.id = raw.id;
+      events.push(ev);
+    });
+    if (events.length === 0) return null;
+    var seen = {};
+    events.forEach(function (e) { if (seen[e.id]) e.id = newId(); seen[e.id] = true; });
+    var ids = events.map(function (e) { return e.id; });
+    var active = ids.indexOf(data.activeEventId) >= 0 ? data.activeEventId : events[0].id;
+    return { events: events, activeEventId: active };
+  }
+
+  // 旧単一イベント形式（v0.1）も含め、保存データを複数イベント形式へ移行する。
+  function migrateStore(data) {
+    if (!data || typeof data !== 'object') return null;
+    if (Array.isArray(data.events)) return validateStore(data);
+    var v = validateImport(data);
+    if (!v) return null;
+    var ev = newEvent(v.eventName);
+    ev.members = v.members; ev.expenses = v.expenses; ev.paidTransfers = v.paidTransfers; ev.me = v.me;
+    ev.roundingUnit = v.roundingUnit; ev.roundingMode = v.roundingMode;
+    return { events: [ev], activeEventId: ev.id };
+  }
+
+  // イベント削除後の保存形式を返す。最後の1件を消した場合は空のイベントを1件作る。
+  function removeEvent(events, activeEventId, removeId) {
+    var rest = events.filter(function (e) { return e.id !== removeId; });
+    if (rest.length === 0) { var blank = newEvent(''); return { events: [blank], activeEventId: blank.id }; }
+    var active = activeEventId === removeId ? rest[0].id : activeEventId;
+    if (rest.map(function (e) { return e.id; }).indexOf(active) < 0) active = rest[0].id;
+    return { events: rest, activeEventId: active };
+  }
+
+  var api = { newExpense: newExpense, normalizeAmount: normalizeAmount, editExpense: editExpense, renameMember: renameMember, computeBalances: computeBalances, settle: settle, totals: totals, validateImport: validateImport, newEvent: newEvent, validateStore: validateStore, migrateStore: migrateStore, removeEvent: removeEvent, transferKey: transferKey, splitTransfers: splitTransfers, togglePaidKey: togglePaidKey, prunePaidKeys: prunePaidKeys, previewShares: previewShares, formatPreview: formatPreview, meBalance: meBalance, involvesMe: involvesMe, settlementText: settlementText, normalizeRounding: normalizeRounding, roundingFromEvent: roundingFromEvent, roundShare: roundShare, roundingModeLabel: roundingModeLabel };
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = api;
+  } else {
+    global.Warikan = api;
+  }
+
+  // ---- 以下はブラウザUI（Node では document がないため実行されない）----
+  if (typeof document === 'undefined') return;
+
+  var STORAGE_KEY = 'warikan-memo-v1';
+  var state = load();
+  var saveFailed = false;
+  // 編集中の支出の id（null なら新規記録モード）。フォームの値は
+  // render() で対象の支出から毎回戻すため、描画で消えても編集状態は残る。
+  var editingId = null;
+
+  function load() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        var data = migrateStore(JSON.parse(raw));
+        if (data) return data;
+      }
+    } catch (err) {}
+    var blank = newEvent('');
+    return { events: [blank], activeEventId: blank.id };
+  }
+
+  function currentEvent() {
+    for (var i = 0; i < state.events.length; i++) {
+      if (state.events[i].id === state.activeEventId) return state.events[i];
+    }
+    return state.events[0];
+  }
+
+  // 保存できない環境でも画面更新を止めない（まちがいノート v0.3.1 の教訓）。
+  function save() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ events: state.events, activeEventId: state.activeEventId }));
+      saveFailed = false;
+      return true;
+    } catch (err) {
+      saveFailed = true;
+      return false;
+    }
+  }
+
+  function yen(n) { return n.toLocaleString('ja-JP') + '円'; }
+
+  // 残高1件の状態文（残高一覧と「自分」のまとめで共通）。
+  function balanceStatus(b) {
+    if (b.balance === 0) return '精算済み';
+    return b.balance > 0 ? yen(b.balance) + ' 受け取る' : yen(-b.balance) + ' 支払う';
+  }
+
+  // 支出フォームの入力から「1人あたり」を試算して表示する。
+  // 金額・支払者・対象チェックが変わるたびに更新される。
+  function updatePreview() {
+    var el = document.getElementById('per-person-preview');
+    var checked = Array.prototype.slice.call(
+      document.querySelectorAll('#f-participants input:checked')).map(function (cb) { return cb.value; });
+    var shares = previewShares(
+      document.getElementById('f-amount').value, checked,
+      document.getElementById('f-payer').value, currentEvent().members,
+      roundingFromEvent(currentEvent()));
+    el.textContent = shares ? formatPreview(shares) : '';
+  }
+
+  // 支出フォームの入力を1件分にまとめて読む（新規記録と編集で共通）。
+  function readExpenseForm() {
+    var checked = Array.prototype.slice.call(
+      document.querySelectorAll('#f-participants input:checked')).map(function (cb) { return cb.value; });
+    return {
+      title: document.getElementById('f-title').value,
+      payer: document.getElementById('f-payer').value,
+      amount: document.getElementById('f-amount').value,
+      participants: checked,
+      memo: document.getElementById('f-memo').value
+    };
+  }
+
+  // 支出1件の内容をフォームに戻す（編集開始時・描画で作り直された後）。
+  function fillFormFromExpense(ex) {
+    document.getElementById('f-title').value = ex.title;
+    document.getElementById('f-payer').value = ex.payer;
+    document.getElementById('f-amount').value = String(ex.amount);
+    document.getElementById('f-memo').value = ex.memo || '';
+    Array.prototype.slice.call(
+      document.querySelectorAll('#f-participants input')).forEach(function (cb) {
+        cb.checked = ex.participants.indexOf(cb.value) >= 0;
+      });
+  }
+
+  // 編集状態をやめ、フォームを空にする（編集中の支出は変わらない）。
+  function clearEdit() {
+    editingId = null;
+    document.getElementById('f-title').value = '';
+    document.getElementById('f-amount').value = '';
+    document.getElementById('f-memo').value = '';
+    document.getElementById('form-msg').textContent = '';
+  }
+
+  function render() {
+    var sel = document.getElementById('event-select');
+    sel.innerHTML = '';
+    state.events.forEach(function (e) {
+      var opt = document.createElement('option');
+      opt.value = e.id; opt.textContent = e.eventName || '名前なしのイベント';
+      sel.appendChild(opt);
+    });
+    sel.value = currentEvent().id;
+    document.getElementById('event-name').value = currentEvent().eventName;
+    document.getElementById('save-warning').style.display = saveFailed ? 'block' : 'none';
+    // データが変わるとコピーした文面が古くなるため、表示のたびに結果表示を消す
+    document.getElementById('copy-msg').textContent = '';
+
+    // メンバー一覧
+    var mList = document.getElementById('member-list');
+    mList.innerHTML = '';
+    currentEvent().members.forEach(function (m) {
+      var chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = m + ' ';
+      var btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'mini'; btn.textContent = '×';
+      btn.title = m + ' を削除';
+      btn.onclick = function () {
+        if (currentEvent().expenses.some(function (ex) { return ex.payer === m || ex.participants.indexOf(m) >= 0; })) {
+          alert('支出に使われているメンバーは削除できません。先にその支出を削除してください。');
+          return;
+        }
+        currentEvent().members = currentEvent().members.filter(function (x) { return x !== m; });
+        // 削除された人が「自分」だったら「自分」指定も外す
+        if (currentEvent().me === m) currentEvent().me = '';
+        save(); render();
+      };
+      chip.appendChild(btn);
+      // 名前変更：支出に使われているメンバーは削除できないため、誤字などは
+      // ここで直せる。支出・「自分」・支払い済み印も一緒に置き換わる。
+      var renameBtn = document.createElement('button');
+      renameBtn.type = 'button'; renameBtn.className = 'mini'; renameBtn.textContent = '変更';
+      renameBtn.title = m + ' の名前を変更';
+      renameBtn.onclick = function () {
+        var next = prompt('新しい名前を入力してください', m);
+        if (next === null) return;
+        var ev = currentEvent();
+        var renamed = renameMember(ev, m, next);
+        if (!renamed) {
+          alert('名前を変更できませんでした（空・同じ名前・すでにいる名前のいずれかです）。');
+          return;
+        }
+        ev.members = renamed.members;
+        ev.expenses = renamed.expenses;
+        ev.paidTransfers = renamed.paidTransfers;
+        ev.me = renamed.me;
+        save(); render();
+      };
+      chip.appendChild(document.createTextNode(' '));
+      chip.appendChild(renameBtn);
+      mList.appendChild(chip);
+    });
+
+    // 「自分」セレクト（イベントごとに保存）。「自分」の行だけ目立たせる。
+    var meSel = document.getElementById('me-select');
+    meSel.innerHTML = '';
+    var noneOpt = document.createElement('option');
+    noneOpt.value = ''; noneOpt.textContent = '（選ばない）';
+    meSel.appendChild(noneOpt);
+    currentEvent().members.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m; opt.textContent = m;
+      meSel.appendChild(opt);
+    });
+    meSel.value = currentEvent().me || '';
+
+    // 支出フォームの支払者セレクトと対象チェックボックス
+    var payerSel = document.getElementById('f-payer');
+    payerSel.innerHTML = '';
+    currentEvent().members.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m; opt.textContent = m;
+      payerSel.appendChild(opt);
+    });
+    var partBox = document.getElementById('f-participants');
+    partBox.innerHTML = '';
+    currentEvent().members.forEach(function (m) {
+      var label = document.createElement('label');
+      label.className = 'check';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.value = m; cb.checked = true;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' ' + m));
+      partBox.appendChild(label);
+    });
+    var formNote = document.getElementById('form-note');
+    formNote.textContent = currentEvent().members.length === 0
+      ? 'まずメンバーを2人以上追加してください。'
+      : '';
+    // 編集中の支出が今のイベントになければ編集状態を外す
+    // （イベント切り替え・イベント削除・支出削除のいずれでもここで整理される）。
+    // 残っていれば、描画で作り直された支払者・対象チェックへ値を戻す。
+    var editing = null;
+    if (editingId) {
+      currentEvent().expenses.forEach(function (ex) { if (ex.id === editingId) editing = ex; });
+      if (!editing) editingId = null;
+    }
+    if (editing) fillFormFromExpense(editing);
+    document.getElementById('expense-submit').textContent = editing ? '更新する' : '支出を記録';
+    document.getElementById('cancel-edit').style.display = editing ? '' : 'none';
+    document.getElementById('edit-note').textContent = editing ? '「' + editing.title + '」を編集中です。' : '';
+
+    // 支出一覧
+    var list = document.getElementById('expense-list');
+    list.innerHTML = '';
+    currentEvent().expenses.forEach(function (ex) {
+      var li = document.createElement('li');
+      li.textContent = ex.title + ' — ' + yen(ex.amount) + '（' + ex.payer + 'が支払い／対象：' + ex.participants.join('・') + '）' + (ex.memo ? ' ' + ex.memo : '');
+      var btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'mini'; btn.textContent = '削除';
+      btn.onclick = function () {
+        var ev = currentEvent();
+        ev.expenses = ev.expenses.filter(function (x) { return x.id !== ex.id; });
+        // 支出が変わると送金内容も変わるため、一致しなくなった支払い済み印を落とす
+        ev.paidTransfers = prunePaidKeys(settle(computeBalances(ev.members, ev.expenses, roundingFromEvent(ev))), ev.paidTransfers);
+        save(); render();
+      };
+      li.appendChild(document.createTextNode(' '));
+      li.appendChild(btn);
+      // 編集：金額の打ち間違いなどを、消して入れ直さずに直せる。
+      // 削除ボタンより後に置く（既存の並びを変えない）。
+      var editBtn = document.createElement('button');
+      editBtn.type = 'button'; editBtn.className = 'mini'; editBtn.textContent = '編集';
+      editBtn.onclick = function () {
+        editingId = ex.id;
+        render();
+      };
+      li.appendChild(document.createTextNode(' '));
+      li.appendChild(editBtn);
+      list.appendChild(li);
+    });
+
+    // 精算サマリー
+    var t = totals(currentEvent().expenses);
+    document.getElementById('summary').textContent =
+      '支出 ' + t.count + '件・合計 ' + yen(t.amount);
+    var balances = computeBalances(currentEvent().members, currentEvent().expenses, roundingFromEvent(currentEvent()));
+    var me = currentEvent().me || '';
+    var bList = document.getElementById('balance-list');
+    bList.innerHTML = '';
+    balances.forEach(function (b) {
+      var li = document.createElement('li');
+      if (b.member === me) li.className = 'me';
+      li.textContent = (b.member === me ? '（自分）' : '') + b.member + '：支払い ' + yen(b.paid) + '／負担 ' + yen(b.share) + ' → ' + balanceStatus(b);
+      bList.appendChild(li);
+    });
+    // 「自分」のまとめ：残高一覧を開かなくても自分の支払い／受け取りが分かる
+    var meSummary = document.getElementById('me-summary');
+    var meB = meBalance(balances, me);
+    meSummary.textContent = meB ? '自分（' + meB.member + '）：' + balanceStatus(meB) : '';
+    var transfers = settle(balances);
+    var split = splitTransfers(transfers, currentEvent().paidTransfers);
+    // 進捗と注記：残高一覧は支払い済み印で変わらないことを明記する
+    // （送金が済んでも立て替えの記録自体は残るため）。
+    var progress = document.getElementById('settlement-progress');
+    var settleNote = document.getElementById('settlement-note');
+    if (transfers.length === 0) {
+      progress.textContent = '';
+      settleNote.textContent = '';
+    } else if (split.paid.length === transfers.length) {
+      progress.textContent = '全て支払い済みです。';
+      settleNote.textContent = '支払い済みにしても、上の残高一覧は元の立て替えから計算したまま変わりません（送金が済んだ印です）。';
+    } else {
+      var remaining = split.unpaid.reduce(function (s, tr) { return s + tr.amount; }, 0);
+      progress.textContent = '支払い済み ' + split.paid.length + '／' + transfers.length + '件・残り ' + yen(remaining);
+      settleNote.textContent = '支払い済みにしても、上の残高一覧は元の立て替えから計算したまま変わりません（送金が済んだ印です）。';
+    }
+    var sList = document.getElementById('settlement-list');
+    sList.innerHTML = '';
+    if (transfers.length === 0) {
+      var li = document.createElement('li');
+      li.textContent = currentEvent().expenses.length === 0 ? '支出がまだありません。' : '全員精算済みです。';
+      sList.appendChild(li);
+    } else {
+      split.unpaid.forEach(function (tr) {
+        var li = document.createElement('li');
+        if (involvesMe(tr, me)) li.className = 'me';
+        li.textContent = tr.from + ' → ' + tr.to + ' に ' + yen(tr.amount) + ' ';
+        var btn = document.createElement('button');
+        btn.type = 'button'; btn.className = 'mini'; btn.textContent = '支払い済みにする';
+        btn.onclick = function () {
+          var ev = currentEvent();
+          ev.paidTransfers = prunePaidKeys(transfers, ev.paidTransfers);
+          var key = transferKey(tr);
+          if (ev.paidTransfers.indexOf(key) < 0) ev.paidTransfers.push(key);
+          save(); render();
+        };
+        li.appendChild(btn);
+        sList.appendChild(li);
+      });
+    }
+    var pList = document.getElementById('paid-list');
+    pList.innerHTML = '';
+    split.paid.forEach(function (tr) {
+      var li = document.createElement('li');
+      if (involvesMe(tr, me)) li.className = 'me';
+      li.textContent = tr.from + ' → ' + tr.to + ' に ' + yen(tr.amount) + '（支払い済み） ';
+      var btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'mini'; btn.textContent = '取り消す';
+      btn.onclick = function () {
+        var ev = currentEvent();
+        ev.paidTransfers = togglePaidKey(ev.paidTransfers, transferKey(tr));
+        save(); render();
+      };
+      li.appendChild(btn);
+      pList.appendChild(li);
+    });
+    // 下部の設定欄：端数設定（イベントごとに保存）。標準は1円単位・切り上げ。
+    var rounding = roundingFromEvent(currentEvent());
+    var unitSel = document.getElementById('rounding-unit');
+    if (unitSel) unitSel.value = String(rounding.unit);
+    var modeSel = document.getElementById('rounding-mode');
+    if (modeSel) modeSel.value = rounding.mode;
+    var roundingNote = document.getElementById('rounding-note');
+    if (roundingNote) {
+      var example = roundShare(1000, 3, rounding);
+      roundingNote.textContent = '今の設定：' + rounding.unit + '円単位で' +
+        roundingModeLabel(rounding.mode) +
+        '（例：1,000円を3人で割ると1人あたり ' + yen(example) + '）。' +
+        '丸めで出た余り／不足は支払った人が引き受けるので、残高一覧では支払った人の負担だけ差額分ずれます。';
+    }
+    updatePreview();
+  }
+
+  document.getElementById('event-name').addEventListener('change', function (ev) {
+    currentEvent().eventName = ev.target.value.trim();
+    save(); render();
+  });
+
+  document.getElementById('event-select').addEventListener('change', function (ev) {
+    state.activeEventId = ev.target.value;
+    // 切り替え時に前のイベントの入力が残って誤登録されるのを防ぐ
+    editingId = null;
+    document.getElementById('f-title').value = '';
+    document.getElementById('f-amount').value = '';
+    document.getElementById('f-memo').value = '';
+    document.getElementById('form-msg').textContent = '';
+    save(); render();
+  });
+
+  document.getElementById('new-event').addEventListener('click', function () {
+    var ev = newEvent('');
+    state.events.push(ev);
+    state.activeEventId = ev.id;
+    save(); render();
+    document.getElementById('event-name').focus();
+  });
+
+  document.getElementById('delete-event').addEventListener('click', function () {
+    var ev = currentEvent();
+    if (!confirm('「' + (ev.eventName || '名前なしのイベント') + '」を削除しますか？支出も一緒に消えます。')) return;
+    var next = removeEvent(state.events, state.activeEventId, ev.id);
+    state.events = next.events; state.activeEventId = next.activeEventId;
+    save(); render();
+  });
+
+  document.getElementById('me-select').addEventListener('change', function (ev) {
+    var v = ev.target.value;
+    currentEvent().me = currentEvent().members.indexOf(v) >= 0 ? v : '';
+    save(); render();
+  });
+
+  // 下部の設定欄：端数の単位と扱いを変えたら、送金内容が変わるため
+  // 一致しなくなった支払い済み印を落としてから再計算する。
+  function onRoundingChange() {
+    var ev = currentEvent();
+    var unitEl = document.getElementById('rounding-unit');
+    var modeEl = document.getElementById('rounding-mode');
+    var rounding = normalizeRounding(unitEl ? unitEl.value : ev.roundingUnit, modeEl ? modeEl.value : ev.roundingMode);
+    ev.roundingUnit = rounding.unit;
+    ev.roundingMode = rounding.mode;
+    ev.paidTransfers = prunePaidKeys(
+      settle(computeBalances(ev.members, ev.expenses, rounding)), ev.paidTransfers);
+    save(); render();
+  }
+  var roundingUnitEl = document.getElementById('rounding-unit');
+  if (roundingUnitEl) roundingUnitEl.addEventListener('change', onRoundingChange);
+  var roundingModeEl = document.getElementById('rounding-mode');
+  if (roundingModeEl) roundingModeEl.addEventListener('change', onRoundingChange);
+
+  document.getElementById('add-member').addEventListener('click', function () {
+    var input = document.getElementById('new-member');
+    var name = input.value.trim();
+    if (!name) return;
+    if (currentEvent().members.indexOf(name) >= 0) { alert('同じ名前のメンバーがいます。'); return; }
+    currentEvent().members.push(name);
+    input.value = '';
+    save(); render();
+  });
+
+  document.getElementById('f-amount').addEventListener('input', updatePreview);
+  document.getElementById('f-payer').addEventListener('change', updatePreview);
+  document.getElementById('f-participants').addEventListener('change', updatePreview);
+
+  document.getElementById('expense-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var msg = document.getElementById('form-msg');
+    msg.textContent = '';
+    var data = readExpenseForm();
+    var evNow = currentEvent();
+    if (editingId) {
+      var updated = editExpense(evNow.expenses, editingId, data, evNow.members);
+      if (!updated) {
+        msg.textContent = '入力を確認してください（金額は1円以上、支払者はメンバー、対象は1人以上）。';
+        return;
+      }
+      evNow.expenses = updated;
+    } else {
+      var ex = newExpense(data, evNow.members);
+      if (!ex) {
+        msg.textContent = '入力を確認してください（金額は1円以上、支払者はメンバー、対象は1人以上）。';
+        return;
+      }
+      evNow.expenses.push(ex);
+    }
+    // 支出の追加・編集で送金内容が変わる場合に備え、一致しなくなった支払い済み印を落とす
+    evNow.paidTransfers = prunePaidKeys(
+      settle(computeBalances(evNow.members, evNow.expenses, roundingFromEvent(evNow))),
+      evNow.paidTransfers);
+    save();
+    clearEdit();
+    render();
+  });
+
+  // 編集をやめる：編集中の支出は変わらず、フォームだけ空になる。
+  document.getElementById('cancel-edit').addEventListener('click', function () {
+    clearEdit();
+    render();
+  });
+
+  // 精算まとめをクリップボードにコピーして、LINEなどに貼れるようにする。
+  // Clipboard API が使えない環境（ファイルで開いた場合など）は
+  // textarea＋execCommand の代替手段に回す。どちらも駄目なら理由を表示する。
+  document.getElementById('copy-settlement').addEventListener('click', function () {
+    var text = settlementText(currentEvent());
+    var msg = document.getElementById('copy-msg');
+    function done(ok) {
+      msg.textContent = ok ? 'コピーしました。LINEなどに貼り付けて送れます。'
+        : 'コピーできませんでした。送金リストを長押しで選択してコピーしてください。';
+    }
+    if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, function () { fallbackCopy(text, done); });
+    } else {
+      fallbackCopy(text, done);
+    }
+  });
+
+  function fallbackCopy(text, done) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      done(!!ok);
+    } catch (err) { done(false); }
+  }
+
+  document.getElementById('export-btn').addEventListener('click', function () {
+    var blob = new Blob([JSON.stringify(currentEvent(), null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'warikan-memo.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  document.getElementById('import-file').addEventListener('change', function (ev) {
+    var file = ev.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        var data = validateImport(JSON.parse(reader.result));
+        if (!data) { alert('読み込めないファイルです。わりかんメモのJSONを選んでください。'); return; }
+        var ev = newEvent(data.eventName);
+        ev.members = data.members; ev.expenses = data.expenses; ev.paidTransfers = data.paidTransfers; ev.me = data.me;
+        ev.roundingUnit = data.roundingUnit; ev.roundingMode = data.roundingMode;
+        state.events.push(ev);
+        state.activeEventId = ev.id;
+        save(); render();
+        alert('「' + (ev.eventName || '名前なしのイベント') + '」を新しいイベントとして追加しました。');
+      } catch (err) { alert('読み込みに失敗しました。'); }
+    };
+    reader.readAsText(file);
+    ev.target.value = '';
+  });
+
+  render();
+})(typeof window !== 'undefined' ? window : globalThis);
