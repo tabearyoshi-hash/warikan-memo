@@ -417,4 +417,46 @@ let evRoundModeText = { eventName: '合宿', members: ['A', 'B', 'C'],
 assert.strictEqual(m.settlementText(evRoundModeText),
   '【わりかんメモ】合宿\nB → A：400円\nC → A：400円\n残り 800円（2件）');
 
-console.log('全テスト通過 (20グループ)');
+// 21. v0.13 支出の記録日時：記録時に付き、編集・改名・読み込みで引き継がれる
+// 記録時は現在時刻に近い値が入る
+let before = Date.now();
+let exDate = m.newExpense({ title: '宿', payer: 'A', amount: 9000, participants: members }, members);
+let afterDate = Date.now();
+assert.ok(exDate.createdAt >= before && exDate.createdAt <= afterDate, '記録日時が現在時刻でない');
+// 明示した日時はそのまま残る。不正な値は null になる
+let exDateGiven = m.newExpense({ title: '宿', payer: 'A', amount: 9000, participants: members, createdAt: 1793123456789 }, members);
+assert.strictEqual(exDateGiven.createdAt, 1793123456789);
+assert.strictEqual(m.newExpense({ title: 'x', payer: 'A', amount: 100, participants: members, createdAt: 'abc' }, members).createdAt, null);
+assert.strictEqual(m.newExpense({ title: 'x', payer: 'A', amount: 100, participants: members, createdAt: -1 }, members).createdAt, null);
+assert.strictEqual(m.newExpense({ title: 'x', payer: 'A', amount: 100, participants: members, createdAt: 0 }, members).createdAt, null);
+// 表示文：ローカル時刻で「月/日 時:分」。日時なし・不正は空文字
+assert.strictEqual(m.formatExpenseDate(new Date(2026, 10, 13, 3, 5).getTime()), '11/13 03:05');
+assert.strictEqual(m.formatExpenseDate(new Date(2026, 0, 2, 15, 30).getTime()), '1/2 15:30');
+assert.match(m.formatExpenseDate(Date.now()), /^\d{1,2}\/\d{1,2} \d{2}:\d{2}$/);
+assert.strictEqual(m.formatExpenseDate(null), '');
+assert.strictEqual(m.formatExpenseDate('abc'), '');
+assert.strictEqual(m.formatExpenseDate(0), '');
+// 編集しても記録日時は変わらない
+let editedDate = m.editExpense(exList, targetId,
+  { title: '宿泊代', payer: 'B', amount: 6000, participants: ['A', 'B'] }, members);
+assert.ok(editedDate);
+assert.strictEqual(editedDate[0].createdAt, exList[0].createdAt);
+// 改名しても記録日時は残る
+let renamedDate = m.renameMember(evRename, 'B', 'B2');
+assert.strictEqual(renamedDate.expenses[0].createdAt, evRename.expenses[0].createdAt);
+// 読み込み：日時があるものは残り、ないものは null（読み込み時刻にしない）
+let impDate = m.validateImport({ eventName: '合宿', members: ['A', 'B'], expenses: [
+  { title: '宿', payer: 'A', amount: 2000, participants: ['A', 'B'], createdAt: 1793123456789 },
+  { title: '昼食', payer: 'B', amount: 1000, participants: ['A', 'B'] },
+]});
+assert.strictEqual(impDate.expenses[0].createdAt, 1793123456789);
+assert.strictEqual(impDate.expenses[1].createdAt, null);
+// 保存形式の移行でも日時が残る
+let storeDate = m.validateStore({ events: [
+  { id: 'e1', eventName: '合宿', members: ['A', 'B'], expenses: [
+    { title: '宿', payer: 'A', amount: 2000, participants: ['A', 'B'], createdAt: 1793123456789 },
+  ] },
+], activeEventId: 'e1' });
+assert.strictEqual(storeDate.events[0].expenses[0].createdAt, 1793123456789);
+
+console.log('全テスト通過 (21グループ)');

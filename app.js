@@ -65,7 +65,27 @@
     return rounded;
   }
 
+  // 支出の記録日時（createdAt）の正規化（純粋関数）。
+  // 有効な数値（ミリ秒）なら整数にして返し、それ以外は null。
+  // 旧データ（日時なし）は null になり、一覧では日時を表示しない。
+  function normalizeCreatedAt(value) {
+    if (typeof value !== 'number' || !isFinite(value) || value <= 0) return null;
+    return Math.floor(value);
+  }
+
+  // 記録日時の表示文（純粋関数）。「11/13 03:05」の形。
+  // 日時がない・不正なものは空文字。
+  function formatExpenseDate(ts) {
+    var t = normalizeCreatedAt(ts);
+    if (t === null) return '';
+    var d = new Date(t);
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
   // 支出1件を正規化する。金額は円・整数・1円以上。対象者は空でないこと。
+  // createdAt は記録した日時（ミリ秒）。渡されなければ記録時点の now、
+  // 渡されて不正なら null（日時なし）。編集・改名・読み込みで引き継ぐ。
   function newExpense(data, members) {
     var amount = Math.floor(normalizeAmount(data.amount));
     if (!isFinite(amount) || amount < 1) return null;
@@ -83,7 +103,8 @@
       payer: payer,
       amount: amount,
       participants: participants,
-      memo: String(data.memo || '').trim()
+      memo: String(data.memo || '').trim(),
+      createdAt: data.createdAt === undefined ? Date.now() : normalizeCreatedAt(data.createdAt)
     };
   }
 
@@ -211,6 +232,7 @@
   // 支出1件を編集する（純粋関数）。id が同じ支出を data で置き換え、
   // id は元のまま残す。見つからない・内容が不正なら null を返し、
   // 元の配列は変更しない（呼び出し側は返値が null でないときだけ差し替える）。
+  // 記録日時（createdAt）は編集しても変わらない（記録した日時のまま）。
   function editExpense(expenses, id, data, members) {
     var idx = -1;
     for (var i = 0; i < expenses.length; i++) {
@@ -220,6 +242,7 @@
     var updated = newExpense(data, members);
     if (!updated) return null;
     updated.id = expenses[idx].id;
+    updated.createdAt = normalizeCreatedAt(expenses[idx].createdAt);
     var next = expenses.slice();
     next[idx] = updated;
     return next;
@@ -246,7 +269,8 @@
       expenses: (ev.expenses || []).map(function (ex) {
         return {
           id: ex.id, title: ex.title, payer: rename(ex.payer), amount: ex.amount,
-          participants: ex.participants.map(rename), memo: ex.memo || ''
+          participants: ex.participants.map(rename), memo: ex.memo || '',
+          createdAt: normalizeCreatedAt(ex.createdAt)
         };
       }),
       paidTransfers: (ev.paidTransfers || []).map(function (key) {
@@ -323,7 +347,12 @@
     var expenses = [];
     for (var i = 0; i < data.expenses.length; i++) {
       var ex = newExpense(data.expenses[i], members);
-      if (ex) expenses.push(ex);
+      if (ex) {
+        // 旧JSONには記録日時がない。読み込み時刻で上書きしないよう、
+        // 日時が有効な値で入っていないものは null（日時なし）にする。
+        if (!normalizeCreatedAt(data.expenses[i].createdAt)) ex.createdAt = null;
+        expenses.push(ex);
+      }
     }
     // 支払い済みキー（v0.3〜）。文字列だけ通し、重複を除く。旧データには無いので空になる。
     var paidTransfers = [];
@@ -387,7 +416,7 @@
     return { events: rest, activeEventId: active };
   }
 
-  var api = { newExpense: newExpense, normalizeAmount: normalizeAmount, editExpense: editExpense, renameMember: renameMember, computeBalances: computeBalances, settle: settle, totals: totals, validateImport: validateImport, newEvent: newEvent, validateStore: validateStore, migrateStore: migrateStore, removeEvent: removeEvent, transferKey: transferKey, splitTransfers: splitTransfers, togglePaidKey: togglePaidKey, prunePaidKeys: prunePaidKeys, previewShares: previewShares, formatPreview: formatPreview, meBalance: meBalance, involvesMe: involvesMe, settlementText: settlementText, normalizeRounding: normalizeRounding, roundingFromEvent: roundingFromEvent, roundShare: roundShare, roundingModeLabel: roundingModeLabel };
+  var api = { newExpense: newExpense, normalizeAmount: normalizeAmount, editExpense: editExpense, renameMember: renameMember, computeBalances: computeBalances, settle: settle, totals: totals, validateImport: validateImport, newEvent: newEvent, validateStore: validateStore, migrateStore: migrateStore, removeEvent: removeEvent, transferKey: transferKey, splitTransfers: splitTransfers, togglePaidKey: togglePaidKey, prunePaidKeys: prunePaidKeys, previewShares: previewShares, formatPreview: formatPreview, meBalance: meBalance, involvesMe: involvesMe, settlementText: settlementText, normalizeRounding: normalizeRounding, roundingFromEvent: roundingFromEvent, roundShare: roundShare, roundingModeLabel: roundingModeLabel, normalizeCreatedAt: normalizeCreatedAt, formatExpenseDate: formatExpenseDate };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
@@ -605,7 +634,8 @@
     list.innerHTML = '';
     currentEvent().expenses.forEach(function (ex) {
       var li = document.createElement('li');
-      li.textContent = ex.title + ' — ' + yen(ex.amount) + '（' + ex.payer + 'が支払い／対象：' + ex.participants.join('・') + '）' + (ex.memo ? ' ' + ex.memo : '');
+      var dateStr = formatExpenseDate(ex.createdAt);
+      li.textContent = ex.title + ' — ' + yen(ex.amount) + '（' + ex.payer + 'が支払い／対象：' + ex.participants.join('・') + '）' + (dateStr ? ' ' + dateStr : '') + (ex.memo ? ' ' + ex.memo : '');
       var btn = document.createElement('button');
       btn.type = 'button'; btn.className = 'mini'; btn.textContent = '削除';
       btn.onclick = function () {
