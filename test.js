@@ -459,4 +459,32 @@ let storeDate = m.validateStore({ events: [
 ], activeEventId: 'e1' });
 assert.strictEqual(storeDate.events[0].expenses[0].createdAt, 1793123456789);
 
-console.log('全テスト通過 (21グループ)');
+// 22. v0.14 支出一覧の並び替え：記録日時で新しい順／古い順、元の配列は変えない
+let exSort = [
+  m.newExpense({ title: '古い', payer: 'A', amount: 100, participants: members, createdAt: 1000 }, members),
+  m.newExpense({ title: '新しい', payer: 'A', amount: 200, participants: members, createdAt: 3000 }, members),
+  m.newExpense({ title: '真ん中', payer: 'A', amount: 300, participants: members, createdAt: 2000 }, members),
+];
+assert.deepStrictEqual(m.sortExpenses(exSort, 'recorded').map(e => e.title), ['古い', '新しい', '真ん中']);
+assert.deepStrictEqual(m.sortExpenses(exSort, 'newest').map(e => e.title), ['新しい', '真ん中', '古い']);
+assert.deepStrictEqual(m.sortExpenses(exSort, 'oldest').map(e => e.title), ['古い', '真ん中', '新しい']);
+// 日時のない支出は最も古いものとして扱う（新しい順では一番下、古い順では一番上）
+let exSortOld = [
+  m.newExpense({ title: '日時あり', payer: 'A', amount: 100, participants: members, createdAt: 1000 }, members),
+  m.newExpense({ title: '日時なし', payer: 'A', amount: 200, participants: members, createdAt: 'abc' }, members),
+];
+assert.strictEqual(exSortOld[1].createdAt, null);
+assert.deepStrictEqual(m.sortExpenses(exSortOld, 'newest').map(e => e.title), ['日時あり', '日時なし']);
+assert.deepStrictEqual(m.sortExpenses(exSortOld, 'oldest').map(e => e.title), ['日時なし', '日時あり']);
+// 同日時は記録順のまま、元の配列は変わらない、不正な指定は記録した順、空でも壊れない
+let exSortSame = [
+  m.newExpense({ title: '先', payer: 'A', amount: 100, participants: members, createdAt: 2000 }, members),
+  m.newExpense({ title: '後', payer: 'A', amount: 200, participants: members, createdAt: 2000 }, members),
+];
+assert.deepStrictEqual(m.sortExpenses(exSortSame, 'newest').map(e => e.title), ['先', '後']);
+assert.deepStrictEqual(m.sortExpenses(exSort, 'bogus').map(e => e.title), ['古い', '新しい', '真ん中']);
+assert.deepStrictEqual(m.sortExpenses(exSort).map(e => e.title), ['古い', '新しい', '真ん中']);
+assert.deepStrictEqual(exSort.map(e => e.title), ['古い', '新しい', '真ん中']); // 元の配列は変更しない
+assert.deepStrictEqual(m.sortExpenses([], 'newest'), []);
+
+console.log('全テスト通過 (22グループ)');

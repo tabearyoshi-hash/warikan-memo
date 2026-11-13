@@ -48,6 +48,11 @@
 
 <section>
 <h2>支出一覧</h2>
+<p><label>並び替え <select id="expense-sort">
+<option value="recorded">記録した順</option>
+<option value="newest">新しい順</option>
+<option value="oldest">古い順</option>
+</select></label> <span class="note">記録した日時で並べ替えます（日時のない古い支出は一番古いものとして扱います）</span></p>
 <p id="summary"></p>
 <ul id="expense-list"></ul>
 </section>

@@ -338,6 +338,26 @@
     };
   }
 
+  // 支出一覧の並び替え（純粋関数）。order は 'recorded'（記録した順・現状維持）
+  // ・'newest'（新しい順）・'oldest'（古い順）。記録日時（createdAt）で並べ、
+  // 日時のない旧データは最も古いものとして扱う（新しい順では一番下、
+  // 古い順では一番上）。同日時は記録順のまま。元の配列は変更せず、
+  // 新しい配列を返す。並び替えは表示だけのもので、残高・送金・保存には影響しない。
+  function sortExpenses(expenses, order) {
+    var list = (expenses || []).map(function (ex, i) { return { ex: ex, i: i }; });
+    if (order === 'newest' || order === 'oldest') {
+      list.sort(function (a, b) {
+        var ta = normalizeCreatedAt(a.ex.createdAt);
+        var tb = normalizeCreatedAt(b.ex.createdAt);
+        var ka = ta === null ? -Infinity : ta;
+        var kb = tb === null ? -Infinity : tb;
+        if (ka !== kb) return order === 'newest' ? kb - ka : ka - kb;
+        return a.i - b.i;
+      });
+    }
+    return list.map(function (item) { return item.ex; });
+  }
+
   // インポート用バリデーション：形が合うものだけ通す
   function validateImport(data) {
     if (!data || typeof data !== 'object') return null;
@@ -416,7 +436,7 @@
     return { events: rest, activeEventId: active };
   }
 
-  var api = { newExpense: newExpense, normalizeAmount: normalizeAmount, editExpense: editExpense, renameMember: renameMember, computeBalances: computeBalances, settle: settle, totals: totals, validateImport: validateImport, newEvent: newEvent, validateStore: validateStore, migrateStore: migrateStore, removeEvent: removeEvent, transferKey: transferKey, splitTransfers: splitTransfers, togglePaidKey: togglePaidKey, prunePaidKeys: prunePaidKeys, previewShares: previewShares, formatPreview: formatPreview, meBalance: meBalance, involvesMe: involvesMe, settlementText: settlementText, normalizeRounding: normalizeRounding, roundingFromEvent: roundingFromEvent, roundShare: roundShare, roundingModeLabel: roundingModeLabel, normalizeCreatedAt: normalizeCreatedAt, formatExpenseDate: formatExpenseDate };
+  var api = { newExpense: newExpense, normalizeAmount: normalizeAmount, editExpense: editExpense, renameMember: renameMember, computeBalances: computeBalances, settle: settle, totals: totals, validateImport: validateImport, newEvent: newEvent, validateStore: validateStore, migrateStore: migrateStore, removeEvent: removeEvent, transferKey: transferKey, splitTransfers: splitTransfers, togglePaidKey: togglePaidKey, prunePaidKeys: prunePaidKeys, previewShares: previewShares, formatPreview: formatPreview, meBalance: meBalance, involvesMe: involvesMe, settlementText: settlementText, normalizeRounding: normalizeRounding, roundingFromEvent: roundingFromEvent, roundShare: roundShare, roundingModeLabel: roundingModeLabel, normalizeCreatedAt: normalizeCreatedAt, formatExpenseDate: formatExpenseDate, sortExpenses: sortExpenses };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
@@ -433,6 +453,9 @@
   // 編集中の支出の id（null なら新規記録モード）。フォームの値は
   // render() で対象の支出から毎回戻すため、描画で消えても編集状態は残る。
   var editingId = null;
+  // 支出一覧の並び替え（表示だけの指定で、保存しない）。
+  // 'recorded'（記録した順・初期値）・'newest'（新しい順）・'oldest'（古い順）。
+  var sortOrder = 'recorded';
 
   function load() {
     try {
@@ -629,10 +652,10 @@
     document.getElementById('cancel-edit').style.display = editing ? '' : 'none';
     document.getElementById('edit-note').textContent = editing ? '「' + editing.title + '」を編集中です。' : '';
 
-    // 支出一覧
+    // 支出一覧（並び替えは表示だけ。編集・削除は支出の id で行うため順番に影響されない）
     var list = document.getElementById('expense-list');
     list.innerHTML = '';
-    currentEvent().expenses.forEach(function (ex) {
+    sortExpenses(currentEvent().expenses, sortOrder).forEach(function (ex) {
       var li = document.createElement('li');
       var dateStr = formatExpenseDate(ex.createdAt);
       li.textContent = ex.title + ' — ' + yen(ex.amount) + '（' + ex.payer + 'が支払い／対象：' + ex.participants.join('・') + '）' + (dateStr ? ' ' + dateStr : '') + (ex.memo ? ' ' + ex.memo : '');
@@ -788,6 +811,13 @@
     var v = ev.target.value;
     currentEvent().me = currentEvent().members.indexOf(v) >= 0 ? v : '';
     save(); render();
+  });
+
+  // 支出一覧の並び替え：表示だけの指定（保存しない）。選んだら並べ直す。
+  document.getElementById('expense-sort').addEventListener('change', function (ev) {
+    var v = ev.target.value;
+    sortOrder = (v === 'newest' || v === 'oldest') ? v : 'recorded';
+    render();
   });
 
   // 下部の設定欄：端数の単位と扱いを変えたら、送金内容が変わるため
