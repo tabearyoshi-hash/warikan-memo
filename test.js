@@ -487,4 +487,21 @@ assert.deepStrictEqual(m.sortExpenses(exSort).map(e => e.title), ['古い', '新
 assert.deepStrictEqual(exSort.map(e => e.title), ['古い', '新しい', '真ん中']); // 元の配列は変更しない
 assert.deepStrictEqual(m.sortExpenses([], 'newest'), []);
 
-console.log('全テスト通過 (22グループ)');
+// 23. v0.15 新しいイベントへのメンバー引き継ぎ：メンバーと「自分」だけをコピーする
+let srcEv = m.newEvent('合宿');
+srcEv.members = ['A', 'B', 'C']; srcEv.me = 'B';
+let inh = m.inheritMembers(srcEv);
+assert.deepStrictEqual(inh, { members: ['A', 'B', 'C'], me: 'B' });
+// コピーは元の配列と別物（新しいイベント側で変えても元は変わらない）
+inh.members.push('D');
+assert.deepStrictEqual(srcEv.members, ['A', 'B', 'C']);
+// 「自分」がメンバーにいなければ空になる
+let srcNoMe = m.newEvent('飲み会');
+srcNoMe.members = ['A', 'B']; srcNoMe.me = 'Z';
+assert.deepStrictEqual(m.inheritMembers(srcNoMe), { members: ['A', 'B'], me: '' });
+// メンバーなし・イベントなしでも壊れない
+assert.deepStrictEqual(m.inheritMembers(m.newEvent('空')), { members: [], me: '' });
+assert.deepStrictEqual(m.inheritMembers(null), { members: [], me: '' });
+assert.deepStrictEqual(m.inheritMembers(undefined), { members: [], me: '' });
+
+console.log('全テスト通過 (23グループ)');

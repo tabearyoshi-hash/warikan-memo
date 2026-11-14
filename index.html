@@ -16,9 +16,10 @@
 <h2>イベント</h2>
 <p><label>切り替え <select id="event-select"></select></label>
 <button id="new-event" type="button">新しいイベント</button>
+<label><input id="copy-members" type="checkbox" checked> 今のイベントのメンバーを引き継ぐ</label>
 <button id="delete-event" type="button">このイベントを削除</button></p>
 <label>イベント名 <input id="event-name" type="text" placeholder="例：スノボ合宿 11月"></label>
-<p class="note">イベントごとにメンバーと支出が分かれます。切り替えると前のイベントのデータは残ったままです。</p>
+<p class="note">イベントごとにメンバーと支出が分かれます。切り替えると前のイベントのデータは残ったままです。新しいイベントを作るとき、チェックを入れたままにすると今のイベントのメンバー（と「自分」の指定）だけを引き継ぎます。支出・支払い済み印・端数設定は引き継ぎません。</p>
 </section>
 
 <section>

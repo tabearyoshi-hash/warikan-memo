@@ -394,6 +394,15 @@
     return { id: newId(), eventName: String(name || ''), members: [], expenses: [], paidTransfers: [], me: '', roundingUnit: 1, roundingMode: 'ceil' };
   }
 
+  // 新しいイベントへ引き継ぐメンバー（名前だけをコピーする）。
+  // 支出・支払い済み印・端数設定は引き継がない（新しいイベントは白紙から）。
+  // 「自分」も、引き継いだメンバーの中にいれば一緒に引き継ぐ。
+  function inheritMembers(source) {
+    var members = (source && Array.isArray(source.members)) ? source.members.slice() : [];
+    var me = (source && typeof source.me === 'string' && members.indexOf(source.me) >= 0) ? source.me : '';
+    return { members: members, me: me };
+  }
+
   // 複数イベントの保存形式 {events:[...], activeEventId} を検証・正規化する。
   function validateStore(data) {
     if (!data || typeof data !== 'object' || !Array.isArray(data.events)) return null;
@@ -436,7 +445,7 @@
     return { events: rest, activeEventId: active };
   }
 
-  var api = { newExpense: newExpense, normalizeAmount: normalizeAmount, editExpense: editExpense, renameMember: renameMember, computeBalances: computeBalances, settle: settle, totals: totals, validateImport: validateImport, newEvent: newEvent, validateStore: validateStore, migrateStore: migrateStore, removeEvent: removeEvent, transferKey: transferKey, splitTransfers: splitTransfers, togglePaidKey: togglePaidKey, prunePaidKeys: prunePaidKeys, previewShares: previewShares, formatPreview: formatPreview, meBalance: meBalance, involvesMe: involvesMe, settlementText: settlementText, normalizeRounding: normalizeRounding, roundingFromEvent: roundingFromEvent, roundShare: roundShare, roundingModeLabel: roundingModeLabel, normalizeCreatedAt: normalizeCreatedAt, formatExpenseDate: formatExpenseDate, sortExpenses: sortExpenses };
+  var api = { newExpense: newExpense, normalizeAmount: normalizeAmount, editExpense: editExpense, renameMember: renameMember, computeBalances: computeBalances, settle: settle, totals: totals, validateImport: validateImport, newEvent: newEvent, validateStore: validateStore, migrateStore: migrateStore, removeEvent: removeEvent, transferKey: transferKey, splitTransfers: splitTransfers, togglePaidKey: togglePaidKey, prunePaidKeys: prunePaidKeys, previewShares: previewShares, formatPreview: formatPreview, meBalance: meBalance, involvesMe: involvesMe, settlementText: settlementText, normalizeRounding: normalizeRounding, roundingFromEvent: roundingFromEvent, roundShare: roundShare, roundingModeLabel: roundingModeLabel, normalizeCreatedAt: normalizeCreatedAt, formatExpenseDate: formatExpenseDate, sortExpenses: sortExpenses, inheritMembers: inheritMembers };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
@@ -553,6 +562,9 @@
     });
     sel.value = currentEvent().id;
     document.getElementById('event-name').value = currentEvent().eventName;
+    // メンバーがいないイベントからは引き継ぐものがないため、引き継ぎチェックを無効にする
+    var copyMembersEl = document.getElementById('copy-members');
+    if (copyMembersEl) copyMembersEl.disabled = currentEvent().members.length === 0;
     document.getElementById('save-warning').style.display = saveFailed ? 'block' : 'none';
     // データが変わるとコピーした文面が古くなるため、表示のたびに結果表示を消す
     document.getElementById('copy-msg').textContent = '';
@@ -792,7 +804,17 @@
   });
 
   document.getElementById('new-event').addEventListener('click', function () {
+    var src = currentEvent();
     var ev = newEvent('');
+    // 「今のイベントのメンバーを引き継ぐ」にチェックがあれば、
+    // メンバー（と「自分」）だけを新しいイベントへコピーする。
+    // 支出・支払い済み印・端数設定は引き継がない。
+    var copyEl = document.getElementById('copy-members');
+    if (copyEl && copyEl.checked && src.members.length > 0) {
+      var inherited = inheritMembers(src);
+      ev.members = inherited.members;
+      ev.me = inherited.me;
+    }
     state.events.push(ev);
     state.activeEventId = ev.id;
     save(); render();
