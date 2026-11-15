@@ -358,6 +358,12 @@
     return list.map(function (item) { return item.ex; });
   }
 
+  // 並び替え指定の正規化（'newest' / 'oldest' 以外は 'recorded'）。
+  // 保存値・セレクト値の両方の入口で使う。
+  function normalizeSortOrder(v) {
+    return (v === 'newest' || v === 'oldest') ? v : 'recorded';
+  }
+
   // インポート用バリデーション：形が合うものだけ通す
   function validateImport(data) {
     if (!data || typeof data !== 'object') return null;
@@ -445,7 +451,7 @@
     return { events: rest, activeEventId: active };
   }
 
-  var api = { newExpense: newExpense, normalizeAmount: normalizeAmount, editExpense: editExpense, renameMember: renameMember, computeBalances: computeBalances, settle: settle, totals: totals, validateImport: validateImport, newEvent: newEvent, validateStore: validateStore, migrateStore: migrateStore, removeEvent: removeEvent, transferKey: transferKey, splitTransfers: splitTransfers, togglePaidKey: togglePaidKey, prunePaidKeys: prunePaidKeys, previewShares: previewShares, formatPreview: formatPreview, meBalance: meBalance, involvesMe: involvesMe, settlementText: settlementText, normalizeRounding: normalizeRounding, roundingFromEvent: roundingFromEvent, roundShare: roundShare, roundingModeLabel: roundingModeLabel, normalizeCreatedAt: normalizeCreatedAt, formatExpenseDate: formatExpenseDate, sortExpenses: sortExpenses, inheritMembers: inheritMembers };
+  var api = { newExpense: newExpense, normalizeAmount: normalizeAmount, editExpense: editExpense, renameMember: renameMember, computeBalances: computeBalances, settle: settle, totals: totals, validateImport: validateImport, newEvent: newEvent, validateStore: validateStore, migrateStore: migrateStore, removeEvent: removeEvent, transferKey: transferKey, splitTransfers: splitTransfers, togglePaidKey: togglePaidKey, prunePaidKeys: prunePaidKeys, previewShares: previewShares, formatPreview: formatPreview, meBalance: meBalance, involvesMe: involvesMe, settlementText: settlementText, normalizeRounding: normalizeRounding, roundingFromEvent: roundingFromEvent, roundShare: roundShare, roundingModeLabel: roundingModeLabel, normalizeCreatedAt: normalizeCreatedAt, formatExpenseDate: formatExpenseDate, sortExpenses: sortExpenses, normalizeSortOrder: normalizeSortOrder, inheritMembers: inheritMembers };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = api;
@@ -462,9 +468,19 @@
   // 編集中の支出の id（null なら新規記録モード）。フォームの値は
   // render() で対象の支出から毎回戻すため、描画で消えても編集状態は残る。
   var editingId = null;
-  // 支出一覧の並び替え（表示だけの指定で、保存しない）。
+  // 支出一覧の並び替え（表示だけの指定だが、セレクトの選択は端末に保存する）。
   // 'recorded'（記録した順・初期値）・'newest'（新しい順）・'oldest'（古い順）。
-  var sortOrder = 'recorded';
+  // 支出データ（STORAGE_KEY）とは別のキーで保存し、支出の読み込みには影響しない。
+  var SORT_KEY = 'warikan-memo-sort-v1';
+  function loadSortOrder() {
+    try {
+      return normalizeSortOrder(localStorage.getItem(SORT_KEY));
+    } catch (err) { return 'recorded'; }
+  }
+  function saveSortOrder() {
+    try { localStorage.setItem(SORT_KEY, sortOrder); } catch (err) {}
+  }
+  var sortOrder = loadSortOrder();
 
   function load() {
     try {
@@ -665,6 +681,9 @@
     document.getElementById('edit-note').textContent = editing ? '「' + editing.title + '」を編集中です。' : '';
 
     // 支出一覧（並び替えは表示だけ。編集・削除は支出の id で行うため順番に影響されない）
+    // 並び替えセレクトの表示を保存された指定に合わせる（開き直しても同じ並び）。
+    var sortEl = document.getElementById('expense-sort');
+    if (sortEl) sortEl.value = sortOrder;
     var list = document.getElementById('expense-list');
     list.innerHTML = '';
     sortExpenses(currentEvent().expenses, sortOrder).forEach(function (ex) {
@@ -835,10 +854,12 @@
     save(); render();
   });
 
-  // 支出一覧の並び替え：表示だけの指定（保存しない）。選んだら並べ直す。
+  // 支出一覧の並び替え：選んだら並べ直し、選択を保存する。
+  // セレクトの表示値は render() で保存された指定に戻す。
   document.getElementById('expense-sort').addEventListener('change', function (ev) {
     var v = ev.target.value;
-    sortOrder = (v === 'newest' || v === 'oldest') ? v : 'recorded';
+    sortOrder = normalizeSortOrder(v);
+    saveSortOrder();
     render();
   });
 

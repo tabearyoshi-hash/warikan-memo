@@ -504,4 +504,13 @@ assert.deepStrictEqual(m.inheritMembers(m.newEvent('空')), { members: [], me: '
 assert.deepStrictEqual(m.inheritMembers(null), { members: [], me: '' });
 assert.deepStrictEqual(m.inheritMembers(undefined), { members: [], me: '' });
 
-console.log('全テスト通過 (23グループ)');
+// 24. v0.16 並び替え指定の正規化：'newest' / 'oldest' 以外は 'recorded'
+assert.strictEqual(m.normalizeSortOrder('newest'), 'newest');
+assert.strictEqual(m.normalizeSortOrder('oldest'), 'oldest');
+assert.strictEqual(m.normalizeSortOrder('recorded'), 'recorded');
+assert.strictEqual(m.normalizeSortOrder('bogus'), 'recorded');
+assert.strictEqual(m.normalizeSortOrder(''), 'recorded');
+assert.strictEqual(m.normalizeSortOrder(null), 'recorded');
+assert.strictEqual(m.normalizeSortOrder(undefined), 'recorded');
+
+console.log('全テスト通過 (24グループ)');
