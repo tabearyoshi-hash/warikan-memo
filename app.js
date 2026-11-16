@@ -714,6 +714,14 @@
       list.appendChild(li);
     });
 
+    // 支出が0件のときは空の案内を出す（支出があるときは隠す。表示だけの変更）。
+    // 文言も JS 側で設定する（summary と同じく、描画が文言を持つ形）。
+    var emptyEl = document.getElementById('expense-empty');
+    if (emptyEl) {
+      emptyEl.textContent = 'まだ支出がありません。上のフォームから記録してください。';
+      emptyEl.style.display = currentEvent().expenses.length ? 'none' : '';
+    }
+
     // 精算サマリー
     var t = totals(currentEvent().expenses);
     document.getElementById('summary').textContent =
